@@ -95,7 +95,6 @@ mov di, ards_buf
 
 .mem_get_ok:
     mov [total_mem_bytes], edx
-    jmp $
 
 
 ; ----- 进入保护模式
@@ -125,3 +124,78 @@ mov ax, SELECTOR_VIDEO
 mov gs, ax
 
 mov byte [gs:160] , 'P'
+
+
+; 创建页表
+call setup_page
+
+; 将描述符导出到 gdt_ptr中
+sgdt [gdt_ptr]
+
+mov ebx, [gdt_ptr + 2]        ; 将段基址保存到 ebx中
+or dword [ebx + 0x18 + 4], 0xc0000000
+
+add dword [gdt_ptr + 2], 0xc0000000
+
+add esp, 0xc0000000           ; 栈指针也映射到内核地址
+
+; 把页目录地址赋给cr3
+mov eax, PAGE_DIR_TABLE_POS
+mov cr3, eax 
+
+; 打开cr0的pg位
+mov eax, cr0
+or eax, 0x80000000
+mov cr0, eax
+
+; 打开分页后，重新加载
+lgdt [gdt_ptr]
+
+mov byte [gs:160], 'v'
+jmp $
+
+setup_page:
+    ; 先把页目录占用的空间清0
+    mov ecx, 4096
+    mov esi, 0
+.clear_page_dir:
+    mov byte [PAGE_DIR_TABLE_POS + esi], 0
+    inc esi
+    loop .clear_page_dir
+
+; 创建页目录项 PDE
+.create_pde:
+    mov eax, PAGE_DIR_TABLE_POS
+    add eax, 0x1000
+    mov ebx, eax                 ; eax是第一个页表的地址
+
+    or eax, PG_US_U | PG_RW_W | PG_P
+    mov [PAGE_DIR_TABLE_POS + 0x0], eax
+    mov [PAGE_DIR_TABLE_POS + 0xc00], eax        ; 0xc00表示第768个页表占用的目录项
+
+    sub eax, 0x1000
+    mov [PAGE_DIR_TABLE_POS + 4092], eax          ; 最后一个页表项是页表自己
+ 
+; 创建页表项(PTE)
+   mov ecx, 256
+   mov esi, 0
+   mov edx, PG_US_U | PG_RW_W | PG_P
+.create_pte:
+    mov [ebx + esi * 4], edx                      ; edx是物理地址 
+    add edx, 4096
+    inc esi
+    loop .create_pte
+
+;  创建内核其他页表的PDE
+    mov eax, PAGE_DIR_TABLE_POS
+    add eax, 0x2000
+    or eax, PG_US_U | PG_RW_W | PG_P
+    mov ebx, PAGE_DIR_TABLE_POS
+    mov ecx, 254
+    mov esi, 769
+.create_kernel_pde:
+    mov [ebx + esi * 4], eax
+    inc esi
+    add eax, 0x1000
+    loop .create_kernel_pde
+    ret
