@@ -119,12 +119,16 @@ mov ax, SELECTOR_DATA
 mov ds, ax
 mov es, ax
 mov ss, ax
-mov esp, LOADER_STACK_TOP
+mov esp, LOADER_STACK_TOP           ; 设置栈顶为 0x900
 mov ax, SELECTOR_VIDEO
 mov gs, ax
 
 mov byte [gs:160] , 'P'
 
+mov eax, KERNEL_START_SECTOR
+mov ebx, KERNEL_BIN_BASE_ADDR
+mov ecx, 200
+call rd_disk_m_32
 
 ; 创建页表
 call setup_page
@@ -151,9 +155,61 @@ mov cr0, eax
 ; 打开分页后，重新加载
 lgdt [gdt_ptr]
 
-mov byte [gs:160], 'v'
-jmp $
+jmp SELECTOR_CODE:enter_kernel
 
+enter_kernel:
+    call kernel_init
+    mov esp, 0xc009f000                              ;设置栈底
+    jmp KERNEL_ENTRY_POINT
+
+;-------------- 将kernel.bin中的segment 拷贝到编译的地址 ------------------------
+kernel_init:
+    xor eax,eax
+    xor ebx,ebx       ; 记录程序头表位置
+    xor ecx,ecx       ; 记录 program header数量
+    xor edx,edx       ; 记录 program header尺寸，及 e_phentsize
+
+    mov dx, [KERNEL_BIN_BASE_ADDR + 42]     ; e_phentsize
+    mov ebx, [KERNEL_BIN_BASE_ADDR + 28]    ; e_phoff, 表示第一个program header在文件中的偏移量
+    add ebx, KERNEL_BIN_BASE_ADDR
+    mov cx, [KERNEL_BIN_BASE_ADDR + 44]     
+
+.each_segment:
+    cmp byte [ebx + 0], PT_NULL
+    je .PTNULL
+
+    push dword [ebx + 16]
+    mov eax, [ebx + 4]
+    add eax, KERNEL_BIN_BASE_ADDR
+    push eax
+    push dword [ebx + 8]
+    call mem_cpy
+    add esp,12                     ; 清空压栈的三个参数
+
+.PTNULL:
+    add ebx, edx                     ; 指向下一个program header
+    loop .each_segment
+    ret
+
+; --------------------- 逐字节拷贝 (dst, src,size) -------- 
+mem_cpy:
+    cld
+    push ebp
+    mov ebp, esp
+    push ecx                   ; rep指令用到了ecx
+
+    mov edi, [ebp + 8]         ; dst
+    mov esi, [ebp + 12]        ; src
+    mov ecx, [ebp + 16]        ; size
+    rep movsb
+
+    pop ecx
+    pop ebp
+    ret 
+
+
+
+; ------------------------------------ 分页 begin -------------------------------------------
 setup_page:
     ; 先把页目录占用的空间清0
     mov ecx, 4096
@@ -198,4 +254,61 @@ setup_page:
     inc esi
     add eax, 0x1000
     loop .create_kernel_pde
+    ret
+
+;-------------------------------------分页 end ----------------------------------------------------
+rd_disk_m_32:
+    mov esi, eax     ;备份eax
+    mov di, cx       ;备份cx
+
+; 设置要读取的扇区数
+    mov dx, 0x1f2
+    mov al,cl
+    out dx,al
+    mov eax,esi
+
+; 将LBA地址存入0x1f3 - 0x1f6
+   mov dx,0x1f3
+   out dx,al
+
+   mov cl,8
+   shr eax,cl
+   mov dx,0x1f4
+   out dx,al
+
+   shr eax,cl
+   mov dx,0x1f5
+   out dx,al
+
+   shr eax,cl
+   and al,0x0f   ; lba第 24 - 27位
+   or al,0xe0   
+   mov dx,0x1f6
+   out dx,al
+
+   ; 读入写命令
+   mov dx,0x1f7
+   mov al,0x20
+   out dx,al
+
+.not_ready:
+    ; 检测硬盘状态
+    nop
+    in al,dx
+    and al,0x88
+    cmp al,0x08
+    jnz .not_ready
+
+    mov ax, di        ; di为要读取的扇区数
+    mov dx,256
+    mul dx
+    mov cx,ax      ; data寄存器为两个字节,所以 cx = di * 512/2 = di * 256    
+
+    mov dx, 0x1f0
+
+.go_on_read:
+    in ax,dx
+    mov [ebx],ax
+    add ebx,2
+    loop .go_on_read 
     ret
